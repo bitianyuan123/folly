@@ -24,6 +24,7 @@ using Executor = folly::experimental::AffinityExecutor;
 Executor::Config config;
 config.policy = Executor::Policy::Borrow;
 config.metric = Executor::LoadMetric::Work;
+config.candidateScope = Executor::CandidateScope::All; // 默认允许所有组参与比较
 config.maxOutstanding = 4096; // 每组，含已经开始的任务；0 为无限制
 config.crossNumaPenaltyUs = 200; // 实验校准值，不是库提供的硬件常数
 config.minGainUs = 100;
@@ -87,6 +88,22 @@ pool.join();
 两者不可混淆：Borrow 从远端父算子回到 home 是一次迁移，即使它没有偏离首选组。
 `Decision::migrated` 为 `chosen != source`，`rerouted` 为 `chosen != preferred`，
 `crossNuma` 比较 source 与 chosen 的有效 NUMA 标签。未指定 NUMA（`-1`）不计跨 NUMA。
+
+`CandidateScope::All` 保持原行为；可选 `PreferredNuma` 只比较与策略首选组相同
+`numaNode` 的候选，所有组必须提供非负 NUMA 标签。该限制先于负载计算和惩罚，
+`LeastLoad` 也不能绕过；它忽略的是惩罚/迟滞，不是候选范围。
+Borrow/LeastLoad 的范围以 home 为中心；Sticky/Fanout 有 parent 时以实际 parent 为中心，
+没有 parent 时使用 home。Home 本就不跨组选择。
+
+这里约束的是 **preferred 所在域，不是 source 所在域**。例如外部传入异 NUMA 的 parent
+给 Borrow，回到 home 仍然允许，`Decision::crossNuma` 会如实为 true。如果 DAG 从 home
+开始、所有后继沿用同一范围且 parent 来自该执行器的实际决定，则不会自行离开 home NUMA。
+测试验证的是标签和路由语义，不要求测试机真的有两颗 NUMA。
+
+该配置不发现拓扑、不绑定内存、不核对标签与物理页。若 worker 的 CPU mask 跨 NUMA 或
+为空继承全机范围，仅凭标签不能宣称运行在本地 NUMA。调用者需要核实每组 CPU 确实属于
+声明的 node，再以相同 CPU 并集、固定工作量和受控内存放置比较 All 与 PreferredNuma。
+它使“域内候选 / 允许跨域候选”的受控实验可表达，不替代 ARM 实机局部性验证。
 
 候选分数：
 
@@ -182,6 +199,9 @@ ctest --test-dir _build-affinity --output-on-failure
 绝对/相对迟滞、过载拒绝、工作量溢出的预留回滚、回调异常清理、跨组递归入队、并发生产者、
 RequestContext 传播、参数校验、启动前绑核和线程 ID。运行异常测试时出现 Folly 的预期异常日志
 不代表测试失败。测试只验证实现契约，不验证 ARM NUMA 上的性能收益。
+
+候选域测试额外覆盖：同域借用并排除更空的远端组、Sticky 的 parent 域、LeastLoad 不能
+越过域限制、Borrow 从外部远端 parent 回 home 的含义，以及未知标签的拒绝和默认兼容性。
 
 正式上线前仍须人工复查：真实 CPU/NUMA/SMT 拓扑与容量、缓存/内存和 RPC 成本、关键路径及
 大任务混合、公平性、有限容量拒绝策略、长运行下原子更新开销、ARM 实机稳定性，以及异常和

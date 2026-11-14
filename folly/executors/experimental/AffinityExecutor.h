@@ -63,6 +63,7 @@ class AffinityExecutor {
   enum class Policy { Home, Borrow, Sticky, Fanout, LeastLoad };
   enum class LoadMetric { Work, Queue, Pending };
   enum class QueueKind { Default, Lifo, Throttled };
+  enum class CandidateScope { All, PreferredNuma };
 
   struct GroupConfig {
     std::vector<int> cpus; // Empty retains the creating thread's allowed mask.
@@ -77,6 +78,9 @@ class AffinityExecutor {
     Policy policy{Policy::Borrow};
     LoadMetric metric{LoadMetric::Work};
     QueueKind queueKind{QueueKind::Default};
+    // Restricts candidates by NUMA label, not memory placement. PreferredNuma
+    // is anchored to the policy's preferred group (home or actual parent).
+    CandidateScope candidateScope{CandidateScope::All};
     std::chrono::nanoseconds wakeUpInterval{0};
     size_t maxOutstanding{0}; // Per group; 0 means unlimited.
     double crossNumaPenaltyUs{0};
@@ -484,6 +488,11 @@ class AffinityExecutor {
     }
     const auto allowed = allowedCpus();
     for (const auto& group : config_.groups) {
+      if (config_.candidateScope == CandidateScope::PreferredNuma &&
+          group.numaNode < 0) {
+        throw std::invalid_argument(
+            "AffinityExecutor: PreferredNuma requires known NUMA labels");
+      }
       if (!group.threads || !std::isfinite(group.capacity) ||
           group.capacity <= 0) {
         throw std::invalid_argument(
@@ -555,6 +564,14 @@ class AffinityExecutor {
     if (balance) {
       for (size_t i = 0; i < groups_.size(); ++i) {
         if (i == d.preferred) {
+          continue;
+        }
+        // This is a candidate constraint, including for LeastLoad. It does not
+        // prohibit Borrow returning to home from an externally supplied parent
+        // in another NUMA domain: source and preferred have distinct meanings.
+        if (config_.candidateScope == CandidateScope::PreferredNuma &&
+            config_.groups[i].numaNode !=
+                config_.groups[d.preferred].numaNode) {
           continue;
         }
         const auto candidateLoad = load(i, hint.estimatedCpuUs);

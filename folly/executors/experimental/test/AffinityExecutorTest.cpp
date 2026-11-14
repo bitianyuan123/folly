@@ -59,10 +59,12 @@ class Gate {
   bool open_{false};
 };
 
-std::future<void> block(Pool& pool, Gate& gate, uint64_t estimate = 10000) {
+std::future<void> block(
+    Pool& pool, Gate& gate, uint64_t estimate = 10000, size_t home = 0) {
   auto started = std::make_shared<std::promise<void>>();
   auto future = started->get_future();
   Pool::Hint hint;
+  hint.home = home;
   hint.estimatedCpuUs = estimate;
   if (!pool.add(hint, [started, &gate](const auto&) {
         started->set_value();
@@ -205,6 +207,93 @@ TEST(AffinityExecutor, LeastLoadIgnoresAffinityPenaltyAndHysteresis) {
   auto release = folly::makeGuard([&] { gate.open(); });
   ASSERT_EQ(block(pool, gate).wait_for(5s), std::future_status::ready);
   EXPECT_EQ(submit(pool).get().chosen, 1);
+}
+
+TEST(AffinityExecutor, PreferredNumaBorrowsLocallyDespiteLowerRemoteLoad) {
+  Gate gate;
+  auto cfg = config();
+  cfg.groups.resize(3);
+  cfg.groups[1].numaNode = 0;
+  cfg.groups[2].numaNode = 1;
+  cfg.candidateScope = Pool::CandidateScope::PreferredNuma;
+  Pool pool(cfg);
+  auto release = folly::makeGuard([&] { gate.open(); });
+  ASSERT_EQ(block(pool, gate, 10000, 0).wait_for(5s), std::future_status::ready);
+  ASSERT_EQ(block(pool, gate, 1000, 1).wait_for(5s), std::future_status::ready);
+  // Local group 1 has less work than home but more than the idle remote group.
+  auto result = submit(pool);
+  EXPECT_EQ(pool.snapshots()[1].pending, 1);
+  EXPECT_EQ(pool.snapshots()[2].outstanding, 0);
+  gate.open();
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  const auto d = result.get();
+  EXPECT_EQ(d.preferred, 0);
+  EXPECT_EQ(d.chosen, 1);
+  EXPECT_TRUE(d.migrated);
+  EXPECT_FALSE(d.crossNuma);
+}
+
+TEST(AffinityExecutor, PreferredNumaStickyAnchorsActualParentDomain) {
+  Gate gate;
+  auto cfg = config(Pool::Policy::Sticky);
+  cfg.groups.resize(3);
+  cfg.groups[2].numaNode = 1;
+  cfg.candidateScope = Pool::CandidateScope::PreferredNuma;
+  Pool pool(cfg);
+  auto release = folly::makeGuard([&] { gate.open(); });
+  ASSERT_EQ(block(pool, gate, 10000, 1).wait_for(5s), std::future_status::ready);
+  Pool::Hint hint;
+  hint.home = 0;
+  hint.hasParent = true;
+  hint.parent = 1;
+  auto result = submit(pool, hint);
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  const auto d = result.get();
+  EXPECT_EQ(d.source, 1);
+  EXPECT_EQ(d.preferred, 1);
+  EXPECT_EQ(d.chosen, 2);
+  EXPECT_FALSE(d.crossNuma);
+}
+
+TEST(AffinityExecutor, PreferredNumaAlsoConstrainsLeastLoad) {
+  Gate gate;
+  auto cfg = config(Pool::Policy::LeastLoad);
+  cfg.candidateScope = Pool::CandidateScope::PreferredNuma;
+  Pool pool(cfg);
+  auto release = folly::makeGuard([&] { gate.open(); });
+  ASSERT_EQ(block(pool, gate).wait_for(5s), std::future_status::ready);
+  auto result = submit(pool);
+  EXPECT_EQ(pool.snapshots()[0].pending, 1);
+  EXPECT_EQ(pool.snapshots()[1].outstanding, 0);
+  gate.open();
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(result.get().chosen, 0);
+}
+
+TEST(AffinityExecutor, PreferredNumaBorrowCanReturnFromExternalRemoteParent) {
+  auto cfg = config();
+  cfg.candidateScope = Pool::CandidateScope::PreferredNuma;
+  Pool pool(cfg);
+  Pool::Hint hint;
+  hint.home = 0;
+  hint.hasParent = true;
+  hint.parent = 1;
+  const auto d = submit(pool, hint).get();
+  EXPECT_EQ(d.source, 1);
+  EXPECT_EQ(d.preferred, 0);
+  EXPECT_EQ(d.chosen, 0);
+  // Scope constrains the preferred domain, not the externally supplied source.
+  EXPECT_TRUE(d.migrated);
+  EXPECT_TRUE(d.crossNuma);
+  EXPECT_FALSE(d.rerouted);
+}
+
+TEST(AffinityExecutor, PreferredNumaRequiresKnownLabelsButAllKeepsCompatibility) {
+  auto cfg = config();
+  cfg.groups[1].numaNode = -1;
+  EXPECT_NO_THROW(Pool{cfg});
+  cfg.candidateScope = Pool::CandidateScope::PreferredNuma;
+  EXPECT_THROW(Pool{cfg}, std::invalid_argument);
 }
 
 TEST(AffinityExecutor, BorrowChargesReturnToHomeAgainstActualSource) {
