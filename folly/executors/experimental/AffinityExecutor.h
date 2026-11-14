@@ -268,26 +268,49 @@ class AffinityExecutor {
     return true;
   }
 
-  /** Relaxed, non-transactional samples; exact conservation only at quiescence.
+  /**
+   * Low-cost, relaxed sample of one group's load and accounting. This does not
+   * lock, allocate, or collect worker TIDs; workerTids remains empty. Fields are
+   * not a transactional snapshot: exact conservation holds only at quiescence.
+   * Throws std::out_of_range for an invalid group.
+   */
+  Snapshot readLoad(size_t group) const {
+    const auto& g = *groups_.at(group);
+    Snapshot s;
+    s.group = group;
+    s.pending = g.pending.load(std::memory_order_relaxed);
+    s.inflight = g.inflight.load(std::memory_order_relaxed);
+    s.outstanding = g.outstanding.load(std::memory_order_relaxed);
+    s.estimatedOutstandingCpuUs = g.work.load(std::memory_order_relaxed);
+    s.submitted = g.submitted.load(std::memory_order_relaxed);
+    s.completed = g.completed.load(std::memory_order_relaxed);
+    s.rejected = g.rejected.load(std::memory_order_relaxed);
+    s.migratedIn = g.migratedIn.load(std::memory_order_relaxed);
+    s.failed = g.failed.load(std::memory_order_relaxed);
+    s.queueDepth = g.pool->getTaskQueueSize();
+    s.capacity = config_.groups[group].capacity;
+    return s;
+  }
+
+  /**
+   * Queue-only fast path: reads Folly's approximate task queue depth without
+   * sampling any accounting counters or worker TIDs. Throws std::out_of_range
+   * for an invalid group. This does not measure kernel runnable threads.
+   */
+  size_t readQueueDepth(size_t group) const {
+    return groups_.at(group)->pool->getTaskQueueSize();
+  }
+
+  /**
+   * Diagnostic samples including worker TIDs; allocates and locks each group's
+   * TID list. Prefer readLoad()/readQueueDepth() for placement decisions.
    */
   std::vector<Snapshot> snapshots() const {
     std::vector<Snapshot> result;
     result.reserve(groups_.size());
     for (size_t i = 0; i < groups_.size(); ++i) {
       const auto& g = *groups_[i];
-      Snapshot s;
-      s.group = i;
-      s.pending = g.pending.load(std::memory_order_relaxed);
-      s.inflight = g.inflight.load(std::memory_order_relaxed);
-      s.outstanding = g.outstanding.load(std::memory_order_relaxed);
-      s.estimatedOutstandingCpuUs = g.work.load(std::memory_order_relaxed);
-      s.submitted = g.submitted.load(std::memory_order_relaxed);
-      s.completed = g.completed.load(std::memory_order_relaxed);
-      s.rejected = g.rejected.load(std::memory_order_relaxed);
-      s.migratedIn = g.migratedIn.load(std::memory_order_relaxed);
-      s.failed = g.failed.load(std::memory_order_relaxed);
-      s.queueDepth = g.pool->getTaskQueueSize();
-      s.capacity = config_.groups[i].capacity;
+      auto s = readLoad(i);
       {
         std::lock_guard lock(g.threadState->mutex);
         s.workerTids = g.threadState->tids;

@@ -97,6 +97,64 @@ TEST(AffinityExecutor, HomeKeepsBusyGroup) {
   EXPECT_EQ(result.get().chosen, 0);
 }
 
+TEST(AffinityExecutor, LoadReadSeparatesRunningAndQueuedWorkWithoutWorkerTids) {
+  for (auto queue : {Pool::QueueKind::Default,
+                     Pool::QueueKind::Lifo,
+                     Pool::QueueKind::Throttled}) {
+    Gate gate;
+    auto cfg = config(Pool::Policy::Home);
+    cfg.queueKind = queue;
+    cfg.groups[0].capacity = 2.5;
+    Pool pool(cfg);
+    auto release = folly::makeGuard([&] { gate.open(); });
+    ASSERT_EQ(block(pool, gate).wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(pool.readQueueDepth(0), 0);
+    EXPECT_EQ(pool.readLoad(0).inflight, 1);
+    auto result = submit(pool);
+    const auto load = pool.readLoad(0);
+    EXPECT_EQ(load.group, 0);
+    EXPECT_EQ(load.pending, 1);
+    EXPECT_EQ(load.inflight, 1);
+    EXPECT_EQ(load.outstanding, 2);
+    EXPECT_EQ(load.estimatedOutstandingCpuUs, 11000);
+    EXPECT_EQ(load.submitted, 2);
+    EXPECT_EQ(load.completed, 0);
+    EXPECT_EQ(load.rejected, 0);
+    EXPECT_EQ(load.migratedIn, 0);
+    EXPECT_EQ(load.failed, 0);
+    EXPECT_EQ(load.queueDepth, 1);
+    EXPECT_EQ(pool.readQueueDepth(0), load.queueDepth);
+    EXPECT_DOUBLE_EQ(load.capacity, 2.5);
+    EXPECT_TRUE(load.workerTids.empty());
+    EXPECT_EQ(pool.snapshots()[0].outstanding, load.outstanding);
+#ifdef __linux__
+    EXPECT_FALSE(pool.snapshots()[0].workerTids.empty());
+#endif
+    EXPECT_EQ(pool.readLoad(1).outstanding, 0);
+    EXPECT_EQ(pool.readQueueDepth(1), 0);
+    gate.open();
+    ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+    pool.join();
+    const auto drained = pool.readLoad(0);
+    EXPECT_EQ(drained.pending, 0);
+    EXPECT_EQ(drained.inflight, 0);
+    EXPECT_EQ(drained.outstanding, 0);
+    EXPECT_EQ(drained.estimatedOutstandingCpuUs, 0);
+    EXPECT_EQ(drained.completed, 2);
+    EXPECT_EQ(pool.readQueueDepth(0), 0);
+    EXPECT_TRUE(drained.workerTids.empty());
+  }
+}
+
+TEST(AffinityExecutor, LoadReadsRejectInvalidGroup) {
+  Pool pool(config());
+  for (auto group : {pool.config().groups.size(),
+                     std::numeric_limits<size_t>::max()}) {
+    EXPECT_THROW(pool.readLoad(group), std::out_of_range);
+    EXPECT_THROW(pool.readQueueDepth(group), std::out_of_range);
+  }
+}
+
 TEST(AffinityExecutor, BorrowAvoidsBusyHomeAndReportsReturnMigration) {
   Gate gate;
   Pool pool(config());
