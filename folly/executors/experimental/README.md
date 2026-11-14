@@ -186,3 +186,26 @@ RequestContext 传播、参数校验、启动前绑核和线程 ID。运行异�
 正式上线前仍须人工复查：真实 CPU/NUMA/SMT 拓扑与容量、缓存/内存和 RPC 成本、关键路径及
 大任务混合、公平性、有限容量拒绝策略、长运行下原子更新开销、ARM 实机稳定性，以及异常和
 取消路径对整个 DAG 完成计数的影响。
+
+## Separately verifiable experiment stages
+
+The companion demo now separates the original request into five deliverables:
+[workflow and acceptance criteria](https://github.com/bitianyuan123/executor_demo/blob/experiment/affinity-load-20261114/stages/README.md).
+The independent-task load experiment uses only stock `CPUThreadPoolExecutor`;
+users can test native queue depth, fixed worker counts, and affinity scopes
+without adopting this extension. The DAG experiment also has a standalone
+business-side router on stock Folly.
+
+Only the final placement experiment enables this library backend. It compiles
+the same workload and the same placement algorithm in two packaging locations,
+checks completion/workload invariants, and records the selected backend in run
+metadata. Dynamic schedules need not match. Moving an identical algorithm into
+Folly is not in itself a performance optimization or evidence that the feature
+is part of the upstream default executor.
+
+The demo's committed business copy and its tests are generated from this header
+and test source with namespace/class/include changes. A source-hash check detects
+drift. This duplication is deliberate for independent evaluation; a production
+integration should choose one owner for the algorithm. See the
+[stage 5 guide](https://github.com/bitianyuan123/executor_demo/blob/experiment/affinity-load-20261114/stages/05-placement/README.md)
+for build commands and remaining lifecycle/NUMA limitations.
