@@ -156,6 +156,8 @@ CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     Options opt)
     : ThreadPoolExecutor(
           numThreads.first, numThreads.second, std::move(threadFactory)),
+      outstandingTaskState_(
+          opt.taskCounting ? std::make_shared<OutstandingTaskState>() : nullptr),
       taskQueue_(std::move(taskQueue)),
       prohibitBlockingOnThreadPools_{opt.blocking} {
   setNumThreads(numThreads.first);
@@ -303,6 +305,14 @@ size_t CPUThreadPoolExecutor::getTaskQueueSize() const {
   return taskQueue_->size();
 }
 
+folly::Optional<size_t>
+CPUThreadPoolExecutor::getOutstandingTaskCount() const noexcept {
+  if (!outstandingTaskState_) {
+    return folly::none;
+  }
+  return outstandingTaskState_->count.load(std::memory_order_relaxed);
+}
+
 WorkerProvider* CPUThreadPoolExecutor::getThreadIdCollector() {
   return threadIdCollector_.get();
 }
@@ -379,10 +389,15 @@ void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
       continue;
     }
 
-    if (auto queueObserver = getQueueObserver(task->priority())) {
-      queueObserver->onDequeued(task->queueObserverPayload_);
+    {
+      auto countGuard = folly::makeGuard([&task] {
+        task->outstandingTicket_.release();
+      });
+      if (auto queueObserver = getQueueObserver(task->priority())) {
+        queueObserver->onDequeued(task->queueObserverPayload_);
+      }
+      runTask(thread, std::move(task.value()));
     }
-    runTask(thread, std::move(task.value()));
 
     if (shouldStopThread(/* isPoison */ false)) {
       std::unique_lock w{threadListLock_};

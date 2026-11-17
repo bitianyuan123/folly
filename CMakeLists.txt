@@ -807,6 +807,10 @@ if (BUILD_TESTS OR BUILD_BENCHMARKS)
     SOURCES
     CodelTest.cpp
     TEST
+    executors_cpu_thread_pool_executor_outstanding_test
+    SOURCES
+    CPUThreadPoolExecutorOutstandingTest.cpp
+    TEST
     executors_executor_test
     SOURCES
     ExecutorTest.cpp

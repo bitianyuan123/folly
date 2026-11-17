@@ -19,6 +19,10 @@
 #include <limits.h>
 
 #include <array>
+#include <atomic>
+#include <memory>
+
+#include <folly/Optional.h>
 
 #include <folly/executors/QueueObserver.h>
 #include <folly/executors/ThreadPoolExecutor.h>
@@ -61,6 +65,46 @@ namespace folly {
 class CPUThreadPoolExecutor
     : public ThreadPoolExecutor,
       public GetThreadIdCollector {
+ private:
+  struct OutstandingTaskState {
+    std::atomic<size_t> count{0};
+  };
+
+  // The reservation follows the task through queue moves. Its shared state may
+  // outlive the executor, including when a custom queue retains discarded tasks.
+  // There is one allocation per enabled executor, not one allocation per task.
+  class OutstandingTaskTicket {
+   public:
+    OutstandingTaskTicket() = default;
+    explicit OutstandingTaskTicket(std::shared_ptr<OutstandingTaskState> state)
+        : state_(std::move(state)) {
+      if (state_) {
+        state_->count.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    OutstandingTaskTicket(OutstandingTaskTicket&&) noexcept = default;
+    OutstandingTaskTicket& operator=(OutstandingTaskTicket&& other) noexcept {
+      if (this != &other) {
+        release();
+        state_ = std::move(other.state_);
+      }
+      return *this;
+    }
+    OutstandingTaskTicket(const OutstandingTaskTicket&) = delete;
+    OutstandingTaskTicket& operator=(const OutstandingTaskTicket&) = delete;
+    ~OutstandingTaskTicket() { release(); }
+
+    void release() noexcept {
+      if (state_) {
+        state_->count.fetch_sub(1, std::memory_order_relaxed);
+        state_.reset();
+      }
+    }
+
+   private:
+    std::shared_ptr<OutstandingTaskState> state_;
+  };
+
  public:
   struct CPUTask;
   struct Options {
@@ -69,14 +113,21 @@ class CPUThreadPoolExecutor
       allow,
     };
 
-    constexpr Options() noexcept : blocking{Blocking::allow} {}
+    constexpr Options() noexcept
+        : blocking{Blocking::allow}, taskCounting{false} {}
 
     Options& setBlocking(Blocking b) {
       blocking = b;
       return *this;
     }
 
+    Options& setTaskCounting(bool enabled = true) {
+      taskCounting = enabled;
+      return *this;
+    }
+
     Blocking blocking;
+    bool taskCounting;
   };
 
   // These function return unbounded blocking queues with the default semaphore.
@@ -155,6 +206,19 @@ class CPUThreadPoolExecutor
 
   size_t getTaskQueueSize() const;
 
+  /**
+   * Number of reserved ordinary tasks not yet finished or discarded. Includes
+   * the submission interval, queue wait, and the complete runTask() interval
+   * (including expiration callbacks and task observers). Dequeue/start does
+   * not decrement it. Internal stop tasks are excluded. stop() may retain
+   * queued tasks, so it does not force the count to zero.
+   *
+   * Returns none unless Options::setTaskCounting() was enabled at construction.
+   * This relaxed snapshot is not a synchronization or admission-control API;
+   * it counts callbacks, not CPU usage, runnable threads, or logical requests.
+   */
+  folly::Optional<size_t> getOutstandingTaskCount() const noexcept;
+
   uint8_t getNumPriorities() const override;
 
   /// Implements the GetThreadIdCollector interface
@@ -169,10 +233,16 @@ class CPUThreadPoolExecutor
         Func&& expireCallback,
         int8_t pri);
 
+    CPUTask(CPUTask&&) noexcept = default;
+    CPUTask& operator=(CPUTask&&) noexcept = default;
+    CPUTask(const CPUTask&) = delete;
+    CPUTask& operator=(const CPUTask&) = delete;
+
    private:
     friend class CPUThreadPoolExecutor;
 
-    intptr_t queueObserverPayload_;
+    intptr_t queueObserverPayload_{0};
+    OutstandingTaskTicket outstandingTicket_;
   };
 
   static const size_t kDefaultMaxQueueSize;
@@ -196,6 +266,7 @@ class CPUThreadPoolExecutor
   std::unique_ptr<folly::QueueObserverFactory> createQueueObserverFactory();
   QueueObserver* FOLLY_NULLABLE getQueueObserver(int8_t pri);
 
+  const std::shared_ptr<OutstandingTaskState> outstandingTaskState_;
   std::unique_ptr<BlockingQueue<CPUTask>> taskQueue_;
   // It is possible to have as many detectors as there are priorities,
   std::array<std::atomic<folly::QueueObserver*>, UCHAR_MAX + 1> queueObservers_;
@@ -212,6 +283,11 @@ void CPUThreadPoolExecutor::addImpl(EnqueueTask&& enqueueTask, CPUTask&& task) {
     invokeCatchingExns("ThreadPoolExecutor: func", std::move(task.func_));
     return;
   }
+
+  // Reserve before observers and queue publication. Exceptions before the
+  // queue accepts the task release the reservation through task destruction.
+  // After publication, the ticket belongs to the task, not the submitter.
+  task.outstandingTicket_ = OutstandingTaskTicket(outstandingTaskState_);
 
   if (auto queueObserver = getQueueObserver(task.priority())) {
     task.queueObserverPayload_ = queueObserver->onEnqueued(task.context_.get());

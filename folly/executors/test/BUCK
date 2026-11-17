@@ -27,6 +27,17 @@ fb_dirsync_cpp_unittest(
 )
 
 fb_dirsync_cpp_unittest(
+    name = "CPUThreadPoolExecutorOutstandingTest",
+    srcs = ["CPUThreadPoolExecutorOutstandingTest.cpp"],
+    deps = [
+        "//folly/executors:cpu_thread_pool_executor",
+        "//folly/executors/task_queue:lifo_sem_mpmc_queue",
+        "//folly/portability:gtest",
+        "//folly/synchronization:baton",
+    ],
+)
+
+fb_dirsync_cpp_unittest(
     name = "FiberIOExecutorTest",
     srcs = ["FiberIOExecutorTest.cpp"],
     deps = [

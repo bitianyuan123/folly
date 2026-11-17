@@ -324,7 +324,6 @@ fb_dirsync_cpp_library(
     deps = [
         "//folly:executor",
         "//folly:memory",
-        "//folly:optional",
         "//folly/executors/task_queue:priority_lifo_sem_mpmc_queue",
         "//folly/executors/task_queue:priority_unbounded_blocking_queue",
         "//folly/executors/task_queue:unbounded_blocking_queue",
@@ -334,6 +333,7 @@ fb_dirsync_cpp_library(
     exported_deps = [
         ":queue_observer",
         ":thread_pool_executor",
+        "//folly:optional",
     ],
 )
 
