@@ -22,6 +22,7 @@
 
 #include <folly/Memory.h>
 #include <folly/Optional.h>
+#include <folly/ScopeGuard.h>
 #include <folly/executors/QueueObserver.h>
 #include <folly/executors/task_queue/PriorityLifoSemMPMCQueue.h>
 #include <folly/executors/task_queue/PriorityUnboundedBlockingQueue.h>
@@ -157,7 +158,8 @@ CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     : ThreadPoolExecutor(
           numThreads.first, numThreads.second, std::move(threadFactory)),
       taskQueue_(std::move(taskQueue)),
-      prohibitBlockingOnThreadPools_{opt.blocking} {
+      prohibitBlockingOnThreadPools_{opt.blocking},
+      busyCountingEnabled_{opt.busyCounting} {
   setNumThreads(numThreads.first);
   if (numThreads.second == 0) {
     minThreads_.store(1, std::memory_order_relaxed);
@@ -303,6 +305,13 @@ size_t CPUThreadPoolExecutor::getTaskQueueSize() const {
   return taskQueue_->size();
 }
 
+folly::Optional<size_t> CPUThreadPoolExecutor::getBusyTaskCount() const noexcept {
+  if (!busyCountingEnabled_) {
+    return folly::none;
+  }
+  return busyTaskCount_.load(std::memory_order_relaxed);
+}
+
 WorkerProvider* CPUThreadPoolExecutor::getThreadIdCollector() {
   return threadIdCollector_.get();
 }
@@ -382,7 +391,18 @@ void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
     if (auto queueObserver = getQueueObserver(task->priority())) {
       queueObserver->onDequeued(task->queueObserverPayload_);
     }
-    runTask(thread, std::move(task.value()));
+    if (busyCountingEnabled_) {
+      // This scope deliberately surrounds runTask instead of changing the
+      // shared ThreadPoolExecutor/IO executor implementation. Never count
+      // queue waiting, QueueObserver::onDequeued(), or poison tasks as busy.
+      busyTaskCount_.fetch_add(1, std::memory_order_relaxed);
+      auto busyGuard = folly::makeGuard([this] {
+        busyTaskCount_.fetch_sub(1, std::memory_order_relaxed);
+      });
+      runTask(thread, std::move(task.value()));
+    } else {
+      runTask(thread, std::move(task.value()));
+    }
 
     if (shouldStopThread(/* isPoison */ false)) {
       std::unique_lock w{threadListLock_};

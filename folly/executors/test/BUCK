@@ -7,6 +7,18 @@ load("@fbsource//tools/build_defs/dirsync:fb_dirsync_cpp_unittest.bzl", "fb_dirs
 oncall("fbcode_entropy_wardens_folly")
 
 fb_dirsync_cpp_unittest(
+    name = "CPUThreadPoolExecutorBusyTest",
+    srcs = ["CPUThreadPoolExecutorBusyTest.cpp"],
+    deps = [
+        "//folly/executors:cpu_thread_pool_executor",
+        "//folly/executors:queue_observer",
+        "//folly/executors/task_queue:lifo_sem_mpmc_queue",
+        "//folly/portability:gtest",
+        "//folly/synchronization:baton",
+    ],
+)
+
+fb_dirsync_cpp_unittest(
     name = "AsyncTest",
     srcs = ["AsyncTest.cpp"],
     deps = [

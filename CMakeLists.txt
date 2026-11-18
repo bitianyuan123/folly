@@ -837,6 +837,10 @@ if (BUILD_TESTS OR BUILD_BENCHMARKS)
     SOURCES
     ThreadPoolExecutorTest.cpp
     TEST
+    executors_cpu_thread_pool_executor_busy_test
+    SOURCES
+    CPUThreadPoolExecutorBusyTest.cpp
+    TEST
     executors_threaded_executor_test
     SOURCES
     ThreadedExecutorTest.cpp

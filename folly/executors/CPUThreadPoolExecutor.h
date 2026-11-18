@@ -19,7 +19,9 @@
 #include <limits.h>
 
 #include <array>
+#include <atomic>
 
+#include <folly/Optional.h>
 #include <folly/executors/QueueObserver.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 
@@ -69,14 +71,21 @@ class CPUThreadPoolExecutor
       allow,
     };
 
-    constexpr Options() noexcept : blocking{Blocking::allow} {}
+    constexpr Options() noexcept
+        : blocking{Blocking::allow}, busyCounting{false} {}
 
     Options& setBlocking(Blocking b) {
       blocking = b;
       return *this;
     }
 
+    Options& setBusyCounting(bool enabled = true) {
+      busyCounting = enabled;
+      return *this;
+    }
+
     Blocking blocking;
+    bool busyCounting;
   };
 
   // These function return unbounded blocking queues with the default semaphore.
@@ -155,6 +164,20 @@ class CPUThreadPoolExecutor
 
   size_t getTaskQueueSize() const;
 
+  /**
+   * Returns the number of ordinary tasks currently inside the worker's runTask
+   * scope, or none when Options::setBusyCounting() was not enabled.
+   *
+   * This is an O(1), relaxed observation of worker occupancy, not an OS
+   * running+runnable count. It includes callbacks blocked on I/O or locks and
+   * runTask's observer/expiration processing, but excludes queued tasks,
+   * QueueObserver::onDequeued(), idle workers, and shutdown poison tasks.
+   * The scope starts just before runTask sets idle=false and ends just after
+   * runTask sets idle=true, so it is not an atomic snapshot of PoolStats.
+   * Zero is not a completion or admission-control synchronization barrier.
+   */
+  folly::Optional<size_t> getBusyTaskCount() const noexcept;
+
   uint8_t getNumPriorities() const override;
 
   /// Implements the GetThreadIdCollector interface
@@ -203,6 +226,8 @@ class CPUThreadPoolExecutor
       createQueueObserverFactory()};
   std::atomic<size_t> threadsToStop_{0};
   Options::Blocking prohibitBlockingOnThreadPools_ = Options::Blocking::allow;
+  const bool busyCountingEnabled_;
+  std::atomic<size_t> busyTaskCount_{0};
 };
 
 template <typename EnqueueTask>

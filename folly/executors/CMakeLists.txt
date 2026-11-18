@@ -39,12 +39,13 @@ folly_add_library(
     folly_executors_task_queue_priority_unbounded_blocking_queue
     folly_executors_task_queue_unbounded_blocking_queue
     folly_memory
-    folly_optional
     folly_portability_gflags
+    folly_scope_guard
     folly_synchronization_throttled_lifo_sem
   EXPORTED_DEPS
     folly_executors_queue_observer
     folly_executors_thread_pool_executor
+    folly_optional
 )
 
 folly_add_library(
